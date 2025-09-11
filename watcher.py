@@ -29,12 +29,13 @@ DJANGO_USERNAME = os.environ["DJANGO_USER"]
 DJANGO_PASSWORD = os.environ["DJANGO_PASS"]
 
 # HubSpot (Private App token)
-HUBSPOT_TOKEN      = os.environ["HUBSPOT_TOKEN"]
-HUBSPOT_OWNER_ID   = os.environ.get("HUBSPOT_OWNER_ID", "154662807")    # task owner
-HUBSPOT_COMPANY_ID = os.environ.get("HUBSPOT_COMPANY_ID", "5590029115") # company to associate
-HUBSPOT_PORTAL_ID  = os.environ.get("HUBSPOT_PORTAL_ID", "")            # for Slack link
+HUBSPOT_TOKEN       = os.environ["HUBSPOT_TOKEN"]
+HUBSPOT_OWNER_ID    = os.environ.get("HUBSPOT_OWNER_ID", "154662807")     # task owner
+HUBSPOT_COMPANY_ID  = os.environ.get("HUBSPOT_COMPANY_ID", "5590029115")  # preferred association
+HUBSPOT_CONTACT_ID  = os.environ.get("HUBSPOT_CONTACT_ID", "154662807")   # fallback association
+HUBSPOT_PORTAL_ID   = os.environ.get("HUBSPOT_PORTAL_ID", "")             # for Slack link
 
-# Slack Workflow Webhook (your new workflow URL)
+# Slack Workflow Webhook (your workflow URL)
 SLACK_WORKFLOW_URL = os.environ.get("SLACK_WORKFLOW_URL")
 
 STATE_FILE = "state.json"
@@ -243,9 +244,21 @@ def hs_associate_task_to_company(task_id: str, company_id: str):
     }]}
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.status_code >= 400:
-        print("Associate task→company error:", r.status_code, r.text)
-        r.raise_for_status()
+        raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
     print(f"Task {task_id} associated to Company {company_id}.")
+
+def hs_associate_task_to_contact(task_id: str, contact_id: str):
+    url = f"{HS_BASE}/crm/v3/associations/tasks/contacts/batch/create"
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
+    payload = {"inputs": [{
+        "from": {"id": str(task_id)},
+        "to":   {"id": str(contact_id)},
+        "type": "task_to_contact"
+    }]}
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    if r.status_code >= 400:
+        raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
+    print(f"Task {task_id} associated to Contact {contact_id}.")
 
 # =========================
 # Slack Workflow webhook
@@ -257,7 +270,6 @@ def send_slack_workflow(task_id: str):
     payload = {
         "portal_id": str(HUBSPOT_PORTAL_ID or ""),
         "task_id": str(task_id),
-        # extra keys are fine; your message only uses portal_id + task_id
     }
     try:
         r = requests.post(SLACK_WORKFLOW_URL, json=payload, timeout=15)
@@ -273,10 +285,18 @@ def send_slack_workflow(task_id: str):
 # =========================
 def create_hubspot_and_notify(ft_ref: str, row_id: int):
     tid = hs_create_task(ft_ref, row_id)
+
+    # Try company association first
     try:
         hs_associate_task_to_company(tid, HUBSPOT_COMPANY_ID)
     except Exception as e:
-        print(f"Association failed: {e}")
+        print(f"Company association failed ({e}); trying contact association…")
+        # Fallback: contact association
+        try:
+            hs_associate_task_to_contact(tid, HUBSPOT_CONTACT_ID)
+        except Exception as e2:
+            print(f"Contact association also failed: {e2}")
+
     send_slack_workflow(tid)
 
 # =========================
