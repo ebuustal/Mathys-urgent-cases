@@ -1,8 +1,13 @@
 name: patent-watcher
 on:
   schedule:
-    - cron: "*/5 * * * 1-5"
-  workflow_dispatch: {}
+    - cron: "*/5 * * * 1-5"   # every 5 minutes, Mon–Fri (UTC)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode (normal or test)"
+        required: false
+        default: "normal"
 permissions:
   contents: write
 jobs:
@@ -24,17 +29,19 @@ jobs:
           HUBSPOT_TOKEN:      ${{ secrets.HUBSPOT_TOKEN }}
           HUBSPOT_COMPANY_ID: ${{ secrets.HUBSPOT_COMPANY_ID }}
           HUBSPOT_OWNER_ID:   ${{ secrets.HUBSPOT_OWNER_ID }}
-          # optional: set LOGIN_URL if your login page isn't embedded on the list page
+          MODE: ${{ github.event.inputs.mode || 'normal' }}
+          # Optional if needed:
           # LOGIN_URL: https://team42api.herokuapp.com/admin/login/
-          # optional: override LIST_URL if needed
-          # LIST_URL:  https://team42api.herokuapp.com/...
+          # LIST_URL:  https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/
         run: python watcher.py
       - name: Upload fetched page (for debugging)
+        if: ${{ github.event.inputs.mode != 'test' }}
         uses: actions/upload-artifact@v4
         with:
           name: last-page
           path: last_page.html
       - name: Commit updated state (if changed)
+        if: ${{ github.event.inputs.mode != 'test' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
