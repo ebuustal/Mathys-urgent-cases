@@ -15,9 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { persist-credentials: true }
+        with:
+          persist-credentials: true
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - run: pip install requests beautifulsoup4
       - name: Run watcher
         env:
@@ -26,11 +28,14 @@ jobs:
           SMTP_USER:  ${{ secrets.SMTP_USER }}
           SMTP_PASS:  ${{ secrets.SMTP_PASS }}
           TO_EMAIL:   ${{ secrets.TO_EMAIL }}
+
           HUBSPOT_TOKEN:      ${{ secrets.HUBSPOT_TOKEN }}
-          HUBSPOT_COMPANY_ID: ${{ secrets.HUBSPOT_COMPANY_ID }}
+          # The next two default to 154662807 in code, you can override via secrets if needed:
           HUBSPOT_OWNER_ID:   ${{ secrets.HUBSPOT_OWNER_ID }}
+          HUBSPOT_CONTACT_ID: ${{ secrets.HUBSPOT_CONTACT_ID }}
+
           MODE: ${{ github.event.inputs.mode || 'normal' }}
-          # Optional if needed:
+          # Optional if your login is at a dedicated page:
           # LOGIN_URL: https://team42api.herokuapp.com/admin/login/
           # LIST_URL:  https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/
         run: python watcher.py
