@@ -1,5 +1,5 @@
 import os, re, json, smtplib, ssl, requests, time
-from email.mime.text import MIMEText
+from email.mime_text import MIMEText
 from email.utils import formatdate
 
 try:
@@ -8,9 +8,9 @@ except Exception:
     BeautifulSoup = None
 
 # ----------------- CONFIG -----------------
-LIST_URL = os.environ.get("LIST_URL", "https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/")
-LOGIN_URL = os.environ.get("LOGIN_URL")  # optional override, e.g. https://team42api.herokuapp.com/admin/login/
-MODEL_PATH_SNIPPET = "/urgentcustomeruploadedpatent/"  # used to extract numeric row IDs
+LIST_URL  = os.environ.get("LIST_URL", "https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/")
+LOGIN_URL = os.environ.get("LOGIN_URL")  # optional e.g. https://team42api.herokuapp.com/admin/login/
+MODEL_PATH_SNIPPET = "/urgentcustomeruploadedpatent/"
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -26,6 +26,7 @@ HUBSPOT_COMPANY_ID  = os.environ["HUBSPOT_COMPANY_ID"]
 HUBSPOT_OWNER_ID    = os.environ["HUBSPOT_OWNER_ID"]
 
 STATE_FILE = "state.json"
+MODE = os.environ.get("MODE", "normal").lower().strip()  # "normal" or "test"
 
 # ----------------- EMAIL -----------------
 def send_email(subject, body):
@@ -59,145 +60,103 @@ def looks_like_login_html(html: str) -> bool:
     ) and (("name=\"password\"" in h) or ("id=\"id_password\"" in h))
 
 def login_and_fetch(session: requests.Session) -> requests.Response:
-    """
-    Returns the final Response for LIST_URL (not just text),
-    after doing login if needed.
-    """
-    # If user supplied a LOGIN_URL, use that flow first
     if LOGIN_URL:
         r0 = session.get(LOGIN_URL, timeout=30, allow_redirects=True)
         r0.raise_for_status()
-        html = r0.text
-        if looks_like_login_html(html):
-            # generic form submit
-            from bs4 import BeautifulSoup as BS  # will raise if bs4 not installed
-            soup = BS(html, "html.parser")
+        if looks_like_login_html(r0.text):
+            from bs4 import BeautifulSoup as BS
+            soup = BS(r0.text, "html.parser")
             form = soup.find("form")
             if not form: raise RuntimeError("Login form not found at LOGIN_URL.")
-            action = form.get("action") or r0.url
-            post_url = requests.compat.urljoin(r0.url, action)
+            post_url = requests.compat.urljoin(r0.url, form.get("action") or r0.url)
             payload = {}
             for inp in form.find_all("input"):
-                name = inp.get("name")
+                name = inp.get("name");  val = inp.get("value", "")
                 if not name: continue
-                payload[name] = inp.get("value", "")
+                payload[name] = val
             for k in list(payload.keys()):
-                low = k.lower()
-                if ("user" in low and "name" in low) or low in ("email","username"):
+                lk = k.lower()
+                if ("user" in lk and "name" in lk) or lk in ("email","username"):
                     payload[k] = DJANGO_USERNAME
-                if "pass" in low:
+                if "pass" in lk:
                     payload[k] = DJANGO_PASSWORD
             r1 = session.post(post_url, data=payload, headers={"Referer": r0.url}, timeout=30, allow_redirects=True)
             r1.raise_for_status()
-        # now fetch target
-        r = session.get(LIST_URL, timeout=30, allow_redirects=True)
-        r.raise_for_status()
-        return r
+        r = session.get(LIST_URL, timeout=30, allow_redirects=True); r.raise_for_status(); return r
 
-    # Otherwise try LIST_URL directly and see if it’s a login page
-    r = session.get(LIST_URL, timeout=30, allow_redirects=True)
-    r.raise_for_status()
-    ct = r.headers.get("content-type", "").lower()
-    if "html" in ct and looks_like_login_html(r.text):
-        # submit that login form
+    r = session.get(LIST_URL, timeout=30, allow_redirects=True); r.raise_for_status()
+    if "html" in (r.headers.get("content-type","").lower()) and looks_like_login_html(r.text):
         from bs4 import BeautifulSoup as BS
         soup = BS(r.text, "html.parser")
         form = soup.find("form")
         if not form: raise RuntimeError("Login form not found (auto).")
-        action = form.get("action") or r.url
-        post_url = requests.compat.urljoin(r.url, action)
+        post_url = requests.compat.urljoin(r.url, form.get("action") or r.url)
         payload = {}
         for inp in form.find_all("input"):
-            name = inp.get("name")
+            name = inp.get("name");  val = inp.get("value", "")
             if not name: continue
-            payload[name] = inp.get("value", "")
+            payload[name] = val
         for k in list(payload.keys()):
-            low = k.lower()
-            if ("user" in low and "name" in low) or low in ("email","username"):
+            lk = k.lower()
+            if ("user" in lk and "name" in lk) or lk in ("email","username"):
                 payload[k] = DJANGO_USERNAME
-            if "pass" in low:
+            if "pass" in lk:
                 payload[k] = DJANGO_PASSWORD
         r2 = session.post(post_url, data=payload, headers={"Referer": r.url}, timeout=30, allow_redirects=True)
         r2.raise_for_status()
-        r3 = session.get(LIST_URL, timeout=30, allow_redirects=True)
-        r3.raise_for_status()
-        return r3
+        r3 = session.get(LIST_URL, timeout=30, allow_redirects=True); r3.raise_for_status(); return r3
     return r
 
 # ----------------- PARSERS -----------------
 def parse_json_for_rows(text: str):
-    """
-    Accepts either a list of objects or an object with 'results'.
-    Tries to find id and ft_ref-like field.
-    """
     try:
         data = json.loads(text)
     except Exception:
         return None
     items = data if isinstance(data, list) else data.get("results") or data.get("data")
-    if not isinstance(items, list):
-        return None
+    if not isinstance(items, list): return None
     rows = []
     for obj in items:
         if not isinstance(obj, dict): continue
-        # id
         rid = None
-        if "id" in obj and str(obj["id"]).isdigit():
-            rid = int(obj["id"])
+        if "id" in obj and str(obj["id"]).isdigit(): rid = int(obj["id"])
         else:
-            # try common keys
-            for k in obj.keys():
-                if k.endswith("_id") and str(obj[k]).isdigit():
-                    rid = int(obj[k]); break
+            for k,v in obj.items():
+                if k.endswith("_id") and str(v).isdigit():
+                    rid = int(v); break
         if rid is None: continue
-        # FT ref
         ft = None
-        # prefer exact-like keys
-        for key in obj.keys():
-            lk = key.lower()
+        for k,v in obj.items():
+            lk = k.lower()
             if "ft" in lk and "ref" in lk:
-                val = obj[key]
-                if isinstance(val, (str,int)):
-                    ft = str(val)
-                    break
+                ft = str(v); break
         rows.append({"id": rid, "ft_ref": ft})
     return rows or None
 
 def parse_html_for_rows(html: str):
-    if not BeautifulSoup:
-        return []
+    if not BeautifulSoup: return []
     soup = BeautifulSoup(html, "html.parser")
-    # prefer tables
     table = soup.find("table")
     if table:
-        header_cells = table.select("thead th")
-        if not header_cells:
-            first_tr = table.find("tr")
-            if first_tr:
-                header_cells = first_tr.find_all(["th","td"])
-        headers = [th.get_text(strip=True).upper() for th in (header_cells or [])]
+        headers = [th.get_text(strip=True).upper() for th in (table.select("thead th") or table.find_all("tr")[0].find_all(["th","td"]))]
         ft_idx = None
-        for i, h in enumerate(headers):
-            if "FT" in h and "PATENT" in h and "REF" in h:
-                ft_idx = i; break
+        for i,h in enumerate(headers):
+            if "FT" in h and "PATENT" in h and "REF" in h: ft_idx = i; break
         body_rows = table.select("tbody tr") or table.find_all("tr")[1:]
-        rows = []
+        rows=[]
         for tr in body_rows:
-            cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td","th"])]
-            row_html = str(tr)
-            m = re.search(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)(?:/|\"|')", row_html)
+            cells=[td.get_text(" ", strip=True) for td in tr.find_all(["td","th"])]
+            row_html=str(tr)
+            m=re.search(re.escape(MODEL_PATH_SNIPPET)+r"(\d+)(?:/|\"|')", row_html)
             if not m:
-                a = tr.find("a", href=True)
-                if a:
-                    m = re.search(r"/(\d+)(?:/|$)", a["href"])
+                a=tr.find("a", href=True)
+                if a: m=re.search(r"/(\d+)(?:/|$)", a["href"])
             if not m: continue
-            rid = int(m.group(1))
-            ft_ref = cells[ft_idx] if ft_idx is not None and ft_idx < len(cells) else None
-            rows.append({"id": rid, "ft_ref": ft_ref or None})
-        if rows:
-            return rows
-    # fallback: any IDs on the page
-    ids = [int(m.group(1)) for m in re.finditer(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)(?:/|\"|')", html)]
+            rid=int(m.group(1))
+            ft=cells[ft_idx] if ft_idx is not None and ft_idx<len(cells) else None
+            rows.append({"id": rid, "ft_ref": ft or None})
+        if rows: return rows
+    ids=[int(m.group(1)) for m in re.finditer(re.escape(MODEL_PATH_SNIPPET)+r"(\d+)(?:/|\"|')", html)]
     return [{"id": i, "ft_ref": None} for i in ids]
 
 # ----------------- HUBSPOT -----------------
@@ -205,13 +164,11 @@ def get_task_company_association_type_id():
     url = "https://api.hubapi.com/crm/v4/associations/tasks/companies/meta"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
     try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
+        r = requests.get(url, headers=headers, timeout=20); r.raise_for_status()
         data = r.json()
         for item in data.get("results", []):
-            name = (item.get("name") or "").lower()
-            if "task_to_company" in name or name.endswith("_to_company"):
-                return item.get("typeId")
+            name=(item.get("name") or "").lower()
+            if "task_to_company" in name or name.endswith("_to_company"): return item.get("typeId")
         for item in data.get("results", []):
             if item.get("associationCategory") == "HUBSPOT_DEFINED" and "typeId" in item:
                 return item["typeId"]
@@ -222,68 +179,56 @@ def get_task_company_association_type_id():
 def create_hubspot_task(ft_ref: str, row_id: int):
     assoc_type_id = get_task_company_association_type_id()
     url = "https://api.hubapi.com/crm/v3/objects/tasks"
-    headers = {
-        "Authorization": f"Bearer {HUBSPOT_TOKEN}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
     subject = "Manual Upload Verification"
-    body = (
-        f"{ft_ref or f'ID {row_id}'}, please verify, "
-        f"if case due in less than 7 days please pass task to OX to confirm we are able to renew"
-    )
+    body = f"{ft_ref or f'ID {row_id}'}, please verify, if case due in less than 7 days please pass task to OX to confirm we are able to renew"
     payload = {
         "properties": {
             "hs_task_subject": subject,
             "hs_task_priority": "HIGH",
             "hs_task_status": "NOT_STARTED",
             "hubspot_owner_id": str(HUBSPOT_OWNER_ID),
-            "hs_timestamp": int(time.time() * 1000),
+            "hs_timestamp": int(time.time()*1000),
             "hs_task_type": "TODO",
             "hs_task_body": body,
         },
-        "associations": [
-            {
-                "to": {"id": str(HUBSPOT_COMPANY_ID)},
-                "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": assoc_type_id}],
-            }
-        ],
+        "associations": [{
+            "to": {"id": str(HUBSPOT_COMPANY_ID)},
+            "types": [{"associationCategory":"HUBSPOT_DEFINED","associationTypeId": assoc_type_id}],
+        }],
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    r.raise_for_status()
+    r = requests.post(url, headers=headers, json=payload, timeout=30); r.raise_for_status()
     print(f"HubSpot task created: {r.json().get('id')} (company {HUBSPOT_COMPANY_ID})")
 
 # ----------------- MAIN -----------------
-def main():
+def normal_mode():
     with requests.Session() as sess:
         resp = login_and_fetch(sess)
     ct = resp.headers.get("content-type","").lower()
     content = resp.text
+    with open("last_page.html","w",encoding="utf-8") as f: f.write(content)
 
-    # Save the fetched page so we can inspect it from Actions artifacts
-    with open("last_page.html", "w", encoding="utf-8") as f:
-        f.write(content)
-
-    # Parse
-    rows = None
-    if "application/json" in ct:
-        rows = parse_json_for_rows(content)
-        print("Parser: JSON")
-    if not rows:
-        rows = parse_html_for_rows(content)
-        print("Parser: HTML")
+    rows = parse_json_for_rows(content) if "application/json" in ct else None
+    if not rows: rows = parse_html_for_rows(content)
 
     if not rows:
-        print("No rows found.")
-        return
+        print("No rows found."); return
 
     state = load_state()
     last = int(state.get("last_seen_id", 0))
     mx = max(r["id"] for r in rows)
 
+    # If we've never seen anything before, ALERT on the latest row (not silent baseline)
     if last == 0:
+        latest = max(rows, key=lambda r: r["id"])
+        ft = latest.get("ft_ref")
+        send_email("New entry detected (first run)",
+                   f"First non-empty detection.\nLatest ID: {latest['id']}\nFT PATENT REF: {ft or 'N/A'}\n\nOpen: {LIST_URL}")
+        try: create_hubspot_task(ft, latest["id"])
+        except Exception as e: print(f"Failed to create task for row {latest['id']}: {e}")
         state["last_seen_id"] = mx
         save_state(state)
-        print(f"Baseline set to ID {mx}.")
+        print(f"First-run alert done. Baseline set to {mx}.")
         return
 
     if mx > last:
@@ -293,24 +238,29 @@ def main():
             label = f"ID {r['id']}"
             if r.get("ft_ref"): label += f" — FT PATENT REF: {r['ft_ref']}"
             lines.append(label)
-
-        email_body = (
-            f"Detected {len(new_rows)} new entr{'y' if len(new_rows)==1 else 'ies'}.\n"
-            f"Previous highest ID: {last}\nLatest ID now: {mx}\n\n" +
-            "\n".join(lines) + f"\n\nOpen: {LIST_URL}\n"
-        )
-        send_email("New entries detected", email_body)
-
+        body = (f"Detected {len(new_rows)} new entr{'y' if len(new_rows)==1 else 'ies'}.\n"
+                f"Previous highest ID: {last}\nLatest ID now: {mx}\n\n" + "\n".join(lines) + f"\n\nOpen: {LIST_URL}")
+        send_email("New entries detected", body)
         for r in new_rows:
-            try:
-                create_hubspot_task(r.get("ft_ref"), r["id"])
-            except Exception as e:
-                print(f"Failed to create task for row {r['id']}: {e}")
-
+            try: create_hubspot_task(r.get("ft_ref"), r["id"])
+            except Exception as e: print(f"Failed to create task for row {r['id']}: {e}")
         state["last_seen_id"] = mx
         save_state(state)
     else:
         print("No new entries.")
 
+def test_mode():
+    # Sends a single test email & HubSpot task (does NOT modify state.json)
+    fake_id = int(time.time()) % 1000000
+    fake_ft = "TEST-FT-REF-" + str(fake_id)
+    send_email("TEST: New entries detected",
+               f"(Test run) Simulated new entry.\nID {fake_id} — FT PATENT REF: {fake_ft}\n\nOpen: {LIST_URL}")
+    try: create_hubspot_task(fake_ft, fake_id)
+    except Exception as e: print(f"Failed to create TEST task: {e}")
+    print("Test alert & HubSpot task sent.")
+
 if __name__ == "__main__":
-    main()
+    if MODE == "test":
+        test_mode()
+    else:
+        normal_mode()
