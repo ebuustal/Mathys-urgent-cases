@@ -1,21 +1,19 @@
 name: patent-watcher
 on:
   schedule:
-    - cron: "*/5 * * * 1-5"   # every 5 minutes, Mon–Fri (UTC)
-  workflow_dispatch: {}        # run manually from the Actions tab
+    - cron: "*/5 * * * 1-5"
+  workflow_dispatch: {}
 permissions:
-  contents: write              # needed to push updated state.json
+  contents: write
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-            persist-credentials: true
+        with: { persist-credentials: true }
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install -r requirements.txt
+        with: { python-version: "3.11" }
+      - run: pip install requests beautifulsoup4
       - name: Run watcher
         env:
           DJANGO_USER: ${{ secrets.DJANGO_USER }}
@@ -26,7 +24,16 @@ jobs:
           HUBSPOT_TOKEN:      ${{ secrets.HUBSPOT_TOKEN }}
           HUBSPOT_COMPANY_ID: ${{ secrets.HUBSPOT_COMPANY_ID }}
           HUBSPOT_OWNER_ID:   ${{ secrets.HUBSPOT_OWNER_ID }}
+          # optional: set LOGIN_URL if your login page isn't embedded on the list page
+          # LOGIN_URL: https://team42api.herokuapp.com/admin/login/
+          # optional: override LIST_URL if needed
+          # LIST_URL:  https://team42api.herokuapp.com/...
         run: python watcher.py
+      - name: Upload fetched page (for debugging)
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-page
+          path: last_page.html
       - name: Commit updated state (if changed)
         run: |
           git config user.name  "github-actions[bot]"
