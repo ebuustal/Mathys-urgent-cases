@@ -7,12 +7,17 @@ try:
 except Exception:
     BeautifulSoup = None
 
-# ---------- CONFIG ----------
-LIST_URL  = os.environ.get("LIST_URL", "https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/")
+# =========================
+# USER CONFIG (with defaults)
+# =========================
+LIST_URL  = os.environ.get(
+    "LIST_URL",
+    "https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/",
+)
 LOGIN_URL = os.environ.get("LOGIN_URL")  # optional admin login page
 MODEL_PATH_SNIPPET = "/urgentcustomeruploadedpatent/"
 
-# Gmail (App Password)
+# Gmail (use an App Password)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ["SMTP_USER"]
@@ -23,18 +28,18 @@ TO_EMAIL  = os.environ["TO_EMAIL"]
 DJANGO_USERNAME = os.environ["DJANGO_USER"]
 DJANGO_PASSWORD = os.environ["DJANGO_PASS"]
 
-# HubSpot (Private App) — only Contacts scopes needed
-#   Required scopes on the private app: crm.objects.contacts.write
-#   Optional (if using email lookup):   crm.objects.contacts.read
-HUBSPOT_TOKEN          = os.environ["HUBSPOT_TOKEN"]
-HUBSPOT_OWNER_ID       = os.environ["HUBSPOT_OWNER_ID"]       # 154662807
-HUBSPOT_CONTACT_ID     = os.environ.get("HUBSPOT_CONTACT_ID") # preferred: direct ID (no read scope)
-HUBSPOT_CONTACT_EMAIL  = os.environ.get("HUBSPOT_CONTACT_EMAIL")  # fallback: lookup by email (needs contacts.read)
+# HubSpot (Private App token; contacts-only flow)
+# NOTE: private app must have at least: crm.objects.contacts.write
+HUBSPOT_TOKEN      = os.environ["HUBSPOT_TOKEN"]
+HUBSPOT_OWNER_ID   = os.environ.get("HUBSPOT_OWNER_ID", "154662807")    # assign task to this owner
+HUBSPOT_CONTACT_ID = os.environ.get("HUBSPOT_CONTACT_ID", "154662807")  # associate task to this contact
 
 STATE_FILE = "state.json"
 MODE = os.environ.get("MODE", "normal").lower().strip()  # "normal" or "test"
 
-# ---------- EMAIL ----------
+# =========================
+# Email
+# =========================
 def send_email(subject, body):
     msg = MIMEText(body)
     msg["Subject"] = subject
@@ -46,7 +51,9 @@ def send_email(subject, body):
         s.login(SMTP_USER, SMTP_PASS)
         s.sendmail(SMTP_USER, [TO_EMAIL], msg.as_string())
 
-# ---------- STATE ----------
+# =========================
+# State
+# =========================
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
@@ -58,14 +65,16 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
-# ---------- LOGIN + FETCH ----------
+# =========================
+# Fetch page (with login if needed)
+# =========================
 def looks_like_login_html(html: str) -> bool:
     h = html.lower()
     return ("csrfmiddlewaretoken" in h) and (
         ("name=\"username\"" in h) or ("id=\"id_username\"" in h) or ("name=\"email\"" in h)
     ) and (("name=\"password\"" in h) or ("id=\"id_password\"" in h))
 
-def login_and_fetch(session: requests.Session) -> requests.Response:
+def login_and_fetch(session: requests.Session):
     if LOGIN_URL:
         r0 = session.get(LOGIN_URL, timeout=30, allow_redirects=True)
         r0.raise_for_status()
@@ -73,12 +82,14 @@ def login_and_fetch(session: requests.Session) -> requests.Response:
             from bs4 import BeautifulSoup as BS
             soup = BS(r0.text, "html.parser")
             form = soup.find("form")
-            if not form: raise RuntimeError("Login form not found at LOGIN_URL.")
+            if not form:
+                raise RuntimeError("Login form not found at LOGIN_URL.")
             post_url = requests.compat.urljoin(r0.url, form.get("action") or r0.url)
             payload = {}
             for inp in form.find_all("input"):
                 name = inp.get("name")
-                if not name: continue
+                if not name:
+                    continue
                 payload[name] = inp.get("value", "")
             for k in list(payload.keys()):
                 lk = k.lower()
@@ -98,12 +109,14 @@ def login_and_fetch(session: requests.Session) -> requests.Response:
         from bs4 import BeautifulSoup as BS
         soup = BS(r.text, "html.parser")
         form = soup.find("form")
-        if not form: raise RuntimeError("Login form not found (auto).")
+        if not form:
+            raise RuntimeError("Login form not found (auto).")
         post_url = requests.compat.urljoin(r.url, form.get("action") or r.url)
         payload = {}
         for inp in form.find_all("input"):
             name = inp.get("name")
-            if not name: continue
+            if not name:
+                continue
             payload[name] = inp.get("value", "")
         for k in list(payload.keys()):
             lk = k.lower()
@@ -118,7 +131,9 @@ def login_and_fetch(session: requests.Session) -> requests.Response:
         return r3
     return r
 
-# ---------- PARSERS ----------
+# =========================
+# Parsers
+# =========================
 def parse_json_for_rows(text: str):
     try:
         data = json.loads(text)
@@ -129,20 +144,24 @@ def parse_json_for_rows(text: str):
         return None
     rows = []
     for obj in items:
-        if not isinstance(obj, dict): continue
+        if not isinstance(obj, dict):
+            continue
         rid = None
         if "id" in obj and str(obj["id"]).isdigit():
             rid = int(obj["id"])
         else:
             for k, v in obj.items():
                 if k.endswith("_id") and str(v).isdigit():
-                    rid = int(v); break
-        if rid is None: continue
+                    rid = int(v)
+                    break
+        if rid is None:
+            continue
         ft = None
         for k, v in obj.items():
             lk = k.lower()
             if "ft" in lk and "ref" in lk:
-                ft = str(v); break
+                ft = str(v)
+                break
         rows.append({"id": rid, "ft_ref": ft})
     return rows or None
 
@@ -161,7 +180,8 @@ def parse_html_for_rows(html: str):
         ft_idx = None
         for i, h in enumerate(headers):
             if "FT" in h and "PATENT" in h and "REF" in h:
-                ft_idx = i; break
+                ft_idx = i
+                break
         body_rows = table.select("tbody tr") or table.find_all("tr")[1:]
         rows = []
         for tr in body_rows:
@@ -172,7 +192,8 @@ def parse_html_for_rows(html: str):
                 a = tr.find("a", href=True)
                 if a:
                     m = re.search(r"/(\d+)(?:/|$)", a["href"])
-            if not m: continue
+            if not m:
+                continue
             rid = int(m.group(1))
             ft = cells[ft_idx] if ft_idx is not None and ft_idx < len(cells) else None
             rows.append({"id": rid, "ft_ref": ft or None})
@@ -181,15 +202,19 @@ def parse_html_for_rows(html: str):
     ids = [int(m.group(1)) for m in re.finditer(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)(?:/|\"|')", html)]
     return [{"id": i, "ft_ref": None} for i in ids]
 
-# ---------- HUBSPOT (contacts-only) ----------
+# =========================
+# HubSpot (contacts-only flow)
+# =========================
 HS_BASE = "https://api.hubapi.com"
 
 def hs_create_task(ft_ref: str, row_id: int) -> str:
-    """Create a Task object; works in many portals with contacts.write."""
     url = f"{HS_BASE}/crm/v3/objects/tasks"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
     subject = "Manual Upload Verification"
-    body = f"{ft_ref or f'ID {row_id}'}, please verify, if case due in less than 7 days please pass task to OX to confirm we are able to renew"
+    body = (
+        f"{ft_ref or f'ID {row_id}'}, please verify, "
+        f"if case due in less than 7 days please pass task to OX to confirm we are able to renew"
+    )
     payload = {
         "properties": {
             "hs_task_subject": subject,
@@ -209,25 +234,7 @@ def hs_create_task(ft_ref: str, row_id: int) -> str:
     print("Created Task:", task_id)
     return task_id
 
-def hs_get_contact_id_by_email(email: str):
-    """Needs contacts.read only if you use the email lookup."""
-    url = f"{HS_BASE}/crm/v3/objects/contacts/search"
-    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
-    payload = {
-        "filterGroups": [{
-            "filters": [{"propertyName": "email", "operator": "EQ", "value": email}]
-        }],
-        "properties": ["email"]
-    }
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    if r.status_code >= 400:
-        print("Contact search error:", r.text)
-        return None
-    results = r.json().get("results") or []
-    return results[0]["id"] if results else None
-
 def hs_associate_task_to_contact(task_id: str, contact_id: str):
-    """Associate via v3 label (contacts permissions suffice)."""
     url = f"{HS_BASE}/crm/v3/associations/tasks/contacts/batch/create"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
     payload = {
@@ -244,28 +251,26 @@ def hs_associate_task_to_contact(task_id: str, contact_id: str):
     print(f"Task {task_id} associated to Contact {contact_id}.")
 
 def create_hubspot_task_and_link(ft_ref: str, row_id: int):
-    task_id = hs_create_task(ft_ref, row_id)
-    contact_id = None
+    tid = hs_create_task(ft_ref, row_id)
     if HUBSPOT_CONTACT_ID:
-        contact_id = HUBSPOT_CONTACT_ID
-    elif HUBSPOT_CONTACT_EMAIL:
-        contact_id = hs_get_contact_id_by_email(HUBSPOT_CONTACT_EMAIL)
-
-    if contact_id:
         try:
-            hs_associate_task_to_contact(task_id, contact_id)
+            hs_associate_task_to_contact(tid, HUBSPOT_CONTACT_ID)
         except Exception as e:
             print(f"Associate to contact failed: {e}")
     else:
-        print("No HUBSPOT_CONTACT_ID/EMAIL provided; leaving task unassociated.")
+        print("No HUBSPOT_CONTACT_ID provided; leaving task unassociated.")
 
-# ---------- MODES ----------
+# =========================
+# Modes
+# =========================
 def normal_mode():
     with requests.Session() as sess:
         resp = login_and_fetch(sess)
+
     ct = resp.headers.get("content-type", "").lower()
     content = resp.text
 
+    # Save fetched page for debugging
     try:
         with open("last_page.html", "w", encoding="utf-8") as f:
             f.write(content)
@@ -284,7 +289,7 @@ def normal_mode():
     last = int(state.get("last_seen_id", 0))
     mx = max(r["id"] for r in rows)
 
-    # First non-empty run: alert + create task for latest
+    # First non-empty run: alert & create single task (latest)
     if last == 0:
         latest = max(rows, key=lambda r: r["id"])
         ft = latest.get("ft_ref")
@@ -306,7 +311,8 @@ def normal_mode():
         lines = []
         for r in new_rows:
             label = f"ID {r['id']}"
-            if r.get("ft_ref"): label += f" — FT PATENT REF: {r['ft_ref']}"
+            if r.get("ft_ref"):
+                label += f" — FT PATENT REF: {r['ft_ref']}"
             lines.append(label)
         body = (
             f"Detected {len(new_rows)} new entr{'y' if len(new_rows)==1 else 'ies'}.\n"
@@ -334,9 +340,11 @@ def test_mode():
         create_hubspot_task_and_link(fake_ft, fake_id)
     except Exception as e:
         print(f"HubSpot TEST error: {e}")
-    print("Test email + HubSpot task (contacts-only) sent.")
+    print("Test email + HubSpot task sent.")
 
-# ---------- MAIN ----------
+# =========================
+# Entry
+# =========================
 if __name__ == "__main__":
     if MODE == "test":
         test_mode()
