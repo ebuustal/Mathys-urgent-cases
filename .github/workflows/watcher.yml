@@ -30,20 +30,25 @@ jobs:
           TO_EMAIL:   ${{ secrets.TO_EMAIL }}
 
           HUBSPOT_TOKEN:      ${{ secrets.HUBSPOT_TOKEN }}
-          HUBSPOT_OWNER_ID:   ${{ secrets.HUBSPOT_OWNER_ID }}     # set to 154662807
-          HUBSPOT_COMPANY_ID: ${{ secrets.HUBSPOT_COMPANY_ID }}   # set to 5590029115
+          HUBSPOT_OWNER_ID:   ${{ secrets.HUBSPOT_OWNER_ID }}     # 154662807
+          HUBSPOT_COMPANY_ID: ${{ secrets.HUBSPOT_COMPANY_ID }}   # 5590029115
+          HUBSPOT_PORTAL_ID:  ${{ secrets.HUBSPOT_PORTAL_ID }}    # e.g. 12345678
+
+          SLACK_WORKFLOW_URL: ${{ secrets.SLACK_WORKFLOW_URL }}   # your Slack workflow webhook URL
 
           MODE: ${{ github.event.inputs.mode || 'normal' }}
-          # Optional if your login is at a dedicated page:
+          # Optional overrides if you have a dedicated login URL:
           # LOGIN_URL: https://team42api.herokuapp.com/admin/login/
           # LIST_URL:  https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/
         run: python watcher.py
+
       - name: Upload fetched page (for debugging)
         if: ${{ github.event.inputs.mode != 'test' }}
         uses: actions/upload-artifact@v4
         with:
           name: last-page
           path: last_page.html
+
       - name: Commit updated state (if changed)
         if: ${{ github.event.inputs.mode != 'test' }}
         run: |
