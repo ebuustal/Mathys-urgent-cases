@@ -34,10 +34,10 @@ jobs:
           HUBSPOT_COMPANY_ID: ${{ secrets.HUBSPOT_COMPANY_ID }}   # 5590029115
           HUBSPOT_PORTAL_ID:  ${{ secrets.HUBSPOT_PORTAL_ID }}    # e.g. 12345678
 
-          SLACK_WORKFLOW_URL: ${{ secrets.SLACK_WORKFLOW_URL }}   # your Slack workflow webhook URL
+          SLACK_WORKFLOW_URL: ${{ secrets.SLACK_WORKFLOW_URL }}   # Slack "From a webhook" URL
 
           MODE: ${{ github.event.inputs.mode || 'normal' }}
-          # Optional overrides if you have a dedicated login URL:
+          # Optional if your login is at a dedicated page:
           # LOGIN_URL: https://team42api.herokuapp.com/admin/login/
           # LIST_URL:  https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/
         run: python watcher.py
