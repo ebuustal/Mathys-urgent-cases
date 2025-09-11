@@ -8,7 +8,7 @@ except Exception:
     BeautifulSoup = None
 
 # =========================
-# USER CONFIG (with defaults)
+# CONFIG
 # =========================
 LIST_URL  = os.environ.get(
     "LIST_URL",
@@ -28,11 +28,11 @@ TO_EMAIL  = os.environ["TO_EMAIL"]
 DJANGO_USERNAME = os.environ["DJANGO_USER"]
 DJANGO_PASSWORD = os.environ["DJANGO_PASS"]
 
-# HubSpot (Private App token; contacts-only flow)
-# NOTE: private app must have at least: crm.objects.contacts.write
+# HubSpot (Private App token)
+# Your private app should allow at least: Tasks (write) and Companies (write)
 HUBSPOT_TOKEN      = os.environ["HUBSPOT_TOKEN"]
-HUBSPOT_OWNER_ID   = os.environ.get("HUBSPOT_OWNER_ID", "154662807")    # assign task to this owner
-HUBSPOT_CONTACT_ID = os.environ.get("HUBSPOT_CONTACT_ID", "154662807")  # associate task to this contact
+HUBSPOT_OWNER_ID   = os.environ.get("HUBSPOT_OWNER_ID", "154662807")    # assigned owner
+HUBSPOT_COMPANY_ID = os.environ.get("HUBSPOT_COMPANY_ID", "5590029115") # associate to this company
 
 STATE_FILE = "state.json"
 MODE = os.environ.get("MODE", "normal").lower().strip()  # "normal" or "test"
@@ -152,16 +152,14 @@ def parse_json_for_rows(text: str):
         else:
             for k, v in obj.items():
                 if k.endswith("_id") and str(v).isdigit():
-                    rid = int(v)
-                    break
+                    rid = int(v); break
         if rid is None:
             continue
         ft = None
         for k, v in obj.items():
             lk = k.lower()
             if "ft" in lk and "ref" in lk:
-                ft = str(v)
-                break
+                ft = str(v); break
         rows.append({"id": rid, "ft_ref": ft})
     return rows or None
 
@@ -180,8 +178,7 @@ def parse_html_for_rows(html: str):
         ft_idx = None
         for i, h in enumerate(headers):
             if "FT" in h and "PATENT" in h and "REF" in h:
-                ft_idx = i
-                break
+                ft_idx = i; break
         body_rows = table.select("tbody tr") or table.find_all("tr")[1:]
         rows = []
         for tr in body_rows:
@@ -192,8 +189,7 @@ def parse_html_for_rows(html: str):
                 a = tr.find("a", href=True)
                 if a:
                     m = re.search(r"/(\d+)(?:/|$)", a["href"])
-            if not m:
-                continue
+            if not m: continue
             rid = int(m.group(1))
             ft = cells[ft_idx] if ft_idx is not None and ft_idx < len(cells) else None
             rows.append({"id": rid, "ft_ref": ft or None})
@@ -203,7 +199,7 @@ def parse_html_for_rows(html: str):
     return [{"id": i, "ft_ref": None} for i in ids]
 
 # =========================
-# HubSpot (contacts-only flow)
+# HubSpot (Private App token)
 # =========================
 HS_BASE = "https://api.hubapi.com"
 
@@ -228,37 +224,35 @@ def hs_create_task(ft_ref: str, row_id: int) -> str:
     }
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.status_code >= 400:
-        print("Task create error:", r.text)
+        print("Task create error:", r.status_code, r.text)
         r.raise_for_status()
     task_id = r.json().get("id")
     print("Created Task:", task_id)
     return task_id
 
-def hs_associate_task_to_contact(task_id: str, contact_id: str):
-    url = f"{HS_BASE}/crm/v3/associations/tasks/contacts/batch/create"
+def hs_associate_task_to_company(task_id: str, company_id: str):
+    # v3 label-based association (no numeric type IDs needed)
+    url = f"{HS_BASE}/crm/v3/associations/tasks/companies/batch/create"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
     payload = {
         "inputs": [{
             "from": {"id": str(task_id)},
-            "to":   {"id": str(contact_id)},
-            "type": "task_to_contact"
+            "to":   {"id": str(company_id)},
+            "type": "task_to_company"
         }]
     }
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.status_code >= 400:
-        print("Associate task→contact error:", r.text)
+        print("Associate task→company error:", r.status_code, r.text)
         r.raise_for_status()
-    print(f"Task {task_id} associated to Contact {contact_id}.")
+    print(f"Task {task_id} associated to Company {company_id}.")
 
 def create_hubspot_task_and_link(ft_ref: str, row_id: int):
     tid = hs_create_task(ft_ref, row_id)
-    if HUBSPOT_CONTACT_ID:
-        try:
-            hs_associate_task_to_contact(tid, HUBSPOT_CONTACT_ID)
-        except Exception as e:
-            print(f"Associate to contact failed: {e}")
-    else:
-        print("No HUBSPOT_CONTACT_ID provided; leaving task unassociated.")
+    try:
+        hs_associate_task_to_company(tid, HUBSPOT_COMPANY_ID)
+    except Exception as e:
+        print(f"Association failed: {e}")
 
 # =========================
 # Modes
