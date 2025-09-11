@@ -30,9 +30,8 @@ jobs:
           TO_EMAIL:   ${{ secrets.TO_EMAIL }}
 
           HUBSPOT_TOKEN:      ${{ secrets.HUBSPOT_TOKEN }}
-          # The next two default to 154662807 in code, you can override via secrets if needed:
-          HUBSPOT_OWNER_ID:   ${{ secrets.HUBSPOT_OWNER_ID }}
-          HUBSPOT_CONTACT_ID: ${{ secrets.HUBSPOT_CONTACT_ID }}
+          HUBSPOT_OWNER_ID:   ${{ secrets.HUBSPOT_OWNER_ID }}     # set to 154662807
+          HUBSPOT_COMPANY_ID: ${{ secrets.HUBSPOT_COMPANY_ID }}   # set to 5590029115
 
           MODE: ${{ github.event.inputs.mode || 'normal' }}
           # Optional if your login is at a dedicated page:
