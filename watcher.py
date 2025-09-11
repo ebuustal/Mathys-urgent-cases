@@ -3,38 +3,28 @@ from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
 from email.utils import formatdate
 
-# ---------- CONFIG ----------
+# ----------------- CONFIG (from secrets) -----------------
 LIST_URL = "https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/"
-MODEL_PATH_SNIPPET = "/urgentcustomeruploadedpatent/"  # used to extract numeric IDs
+MODEL_PATH_SNIPPET = "/urgentcustomeruploadedpatent/"  # used to extract numeric row IDs
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ["SMTP_USER"]     # your Gmail address
-SMTP_PASS = os.environ["SMTP_PASS"]     # your Gmail App Password
-TO_EMAIL  = os.environ["TO_EMAIL"]      # where alerts go
+SMTP_USER = os.environ["SMTP_USER"]     # Gmail address (sender)
+SMTP_PASS = os.environ["SMTP_PASS"]     # Gmail App Password (16 chars)
+TO_EMAIL  = os.environ["TO_EMAIL"]      # alert recipient
 
-DJANGO_USERNAME = os.environ["DJANGO_USER"]
+DJANGO_USERNAME = os.environ["DJANGO_USER"]  # site login
 DJANGO_PASSWORD = os.environ["DJANGO_PASS"]
 
+# HubSpot (kept in GitHub Secrets)
 HUBSPOT_TOKEN       = os.environ["HUBSPOT_TOKEN"]
-HUBSPOT_COMPANY_ID  = os.environ["HUBSPOT_COMPANY_ID"]   # e.g. 10170876313
-HUBSPOT_OWNER_ID    = os.environ["HUBSPOT_OWNER_ID"]     # e.g. 154662807
+HUBSPOT_COMPANY_ID  = os.environ["HUBSPOT_COMPANY_ID"]   # e.g., 5590029115
+HUBSPOT_OWNER_ID    = os.environ["HUBSPOT_OWNER_ID"]     # e.g., 154662807
 
-STATE_FILE = "state.json"  # remembered across runs by committing it back to the repo
+STATE_FILE = "state.json"  # saved back to repo to remember last-seen ID
 
 
-# ---------- HELPERS ----------
-def load_state():
-    try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {"last_seen_id": 0}
-
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
+# ----------------- EMAIL -----------------
 def send_email(subject, body):
     msg = MIMEText(body)
     msg["Subject"] = subject
@@ -46,6 +36,21 @@ def send_email(subject, body):
         s.login(SMTP_USER, SMTP_PASS)
         s.sendmail(SMTP_USER, [TO_EMAIL], msg.as_string())
 
+
+# ----------------- STATE -----------------
+def load_state():
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"last_seen_id": 0}
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+# ----------------- LOGIN + FETCH -----------------
 def _looks_like_login(html: str) -> bool:
     h = html.lower()
     return ("csrfmiddlewaretoken" in h) and (
@@ -54,14 +59,13 @@ def _looks_like_login(html: str) -> bool:
 
 def login_and_fetch(session: requests.Session) -> str:
     """
-    Fetches LIST_URL; if redirected to a login form, submits it (generic parser),
-    then fetches LIST_URL again.
+    Tries LIST_URL; if a login form appears, submit it generically, then refetch LIST_URL.
     """
     r = session.get(LIST_URL, timeout=30, allow_redirects=True)
     r.raise_for_status()
 
     if not _looks_like_login(r.text):
-        return r.text  # already public / session not needed
+        return r.text  # already accessible
 
     soup = BeautifulSoup(r.text, "html.parser")
     form = soup.find("form")
@@ -70,7 +74,6 @@ def login_and_fetch(session: requests.Session) -> str:
     action = form.get("action") or r.url
     login_url = requests.compat.urljoin(r.url, action)
 
-    # Collect all login form inputs (keeps CSRF + next)
     payload = {}
     for inp in form.find_all("input"):
         name = inp.get("name")
@@ -78,7 +81,6 @@ def login_and_fetch(session: requests.Session) -> str:
             continue
         payload[name] = inp.get("value", "")
 
-    # Fill username/password into probable fields
     for key in list(payload.keys()):
         low = key.lower()
         if ("user" in low and "name" in low) or (low == "email") or (low == "username"):
@@ -94,18 +96,19 @@ def login_and_fetch(session: requests.Session) -> str:
     r3.raise_for_status()
     return r3.text
 
+
+# ----------------- PARSE TABLE -----------------
 def parse_entries(html: str):
     """
-    Returns [{id: int, ft_ref: str|None}].
-    Detects a table, finds the 'FT PATENT REF' column (case-insensitive).
-    Falls back to IDs only if needed.
+    Returns a list of dicts: [{id: int, ft_ref: str|None}]
+    Finds a table, detects 'FT PATENT REF' column (case-insensitive).
     """
     soup = BeautifulSoup(html, "html.parser")
     entries = []
 
     table = soup.find("table")
     if table:
-        # Get headers
+        # headers
         header_cells = table.select("thead th")
         if not header_cells:
             first_tr = table.find("tr")
@@ -119,7 +122,7 @@ def parse_entries(html: str):
                 ft_idx = i
                 break
 
-        # Body rows
+        # rows
         body_rows = table.select("tbody tr") or table.find_all("tr")[1:]
         for tr in body_rows:
             cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td","th"])]
@@ -140,14 +143,16 @@ def parse_entries(html: str):
     if entries:
         return entries
 
-    # Fallback: scan entire page for IDs
+    # fallback: scan page for IDs
     ids = [int(m.group(1)) for m in re.finditer(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)(?:/|\"|')", html)]
     return [{"id": i, "ft_ref": None} for i in ids]
 
+
+# ----------------- HUBSPOT -----------------
 def get_task_company_association_type_id():
     """
-    Ask HubSpot which associationTypeId links tasks -> companies.
-    Fallback to 341 if the meta call fails.
+    Queries HubSpot for the correct association type (tasks -> companies).
+    Falls back to 341 if meta call fails.
     """
     url = "https://api.hubapi.com/crm/v4/associations/tasks/companies/meta"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
@@ -155,21 +160,22 @@ def get_task_company_association_type_id():
         r = requests.get(url, headers=headers, timeout=20)
         r.raise_for_status()
         data = r.json()
+        # try sensible pick
         for item in data.get("results", []):
             name = (item.get("name") or "").lower()
             if "task_to_company" in name or name.endswith("_to_company"):
                 return item.get("typeId")
-        # otherwise just return the first HUBSPOT_DEFINED typeId if present
         for item in data.get("results", []):
             if item.get("associationCategory") == "HUBSPOT_DEFINED" and "typeId" in item:
                 return item["typeId"]
     except Exception:
         pass
-    return 341  # common default, works in most portals
+    return 341  # common default
 
 def create_hubspot_task(ft_ref: str, row_id: int):
     """
-    Creates a HubSpot Task, assigns to HUBSPOT_OWNER_ID, and associates to HUBSPOT_COMPANY_ID.
+    Creates a HubSpot Task, assigned to HUBSPOT_OWNER_ID, associated with HUBSPOT_COMPANY_ID.
+    Task name/body set per your request.
     """
     assoc_type_id = get_task_company_association_type_id()
     url = "https://api.hubapi.com/crm/v3/objects/tasks"
@@ -177,13 +183,13 @@ def create_hubspot_task(ft_ref: str, row_id: int):
         "Authorization": f"Bearer {HUBSPOT_TOKEN}",
         "Content-Type": "application/json",
     }
-    subject = f"New urgent patent uploaded: {ft_ref or f'ID {row_id}'}"
+
+    subject = "Manual Upload Verification"
     body = (
-        f"A new urgent customer-uploaded patent was detected.\n"
-        f"System ID: {row_id}\n"
-        f"FT PATENT REF: {ft_ref or 'N/A'}\n"
-        f"List: {LIST_URL}\n"
+        f"{ft_ref or f'ID {row_id}'}, please verify, "
+        f"if case due in less than 7 days please pass task to OX to confirm we are able to renew"
     )
+
     payload = {
         "properties": {
             "hs_task_subject": subject,
@@ -206,13 +212,14 @@ def create_hubspot_task(ft_ref: str, row_id: int):
             }
         ],
     }
+
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     r.raise_for_status()
-    # Avoid printing secrets or full payloads
     created = r.json()
     print(f"HubSpot task created: {created.get('id')} (company {HUBSPOT_COMPANY_ID})")
 
-# ---------- MAIN ----------
+
+# ----------------- MAIN -----------------
 def main():
     with requests.Session() as sess:
         html = login_and_fetch(sess)
@@ -226,7 +233,7 @@ def main():
     last = int(state.get("last_seen_id", 0))
     mx = max(r["id"] for r in rows)
 
-    # First run: baseline without alert flood
+    # First run: baseline to avoid spamming existing rows
     if last == 0:
         state["last_seen_id"] = mx
         save_state(state)
@@ -235,6 +242,7 @@ def main():
 
     if mx > last:
         new_rows = sorted([r for r in rows if r["id"] > last], key=lambda x: x["id"])
+        # email summary
         lines = []
         for r in new_rows:
             label = f"ID {r['id']}"
@@ -249,9 +257,9 @@ def main():
             "\n".join(lines) +
             f"\n\nOpen: {LIST_URL}\n"
         )
-        send_email(f"New entries detected ({len(new_rows)})", email_body)
+        send_email("New entries detected", email_body)
 
-        # Create a HubSpot task per new row
+        # create a HubSpot task per new row
         for r in new_rows:
             try:
                 create_hubspot_task(r.get("ft_ref"), r["id"])
@@ -265,3 +273,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
