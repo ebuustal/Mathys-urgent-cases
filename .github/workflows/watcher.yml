@@ -1,0 +1,40 @@
+name: patent-watcher
+on:
+  schedule:
+    - cron: "*/5 * * * 1-5"   # every 5 minutes, Mon–Fri (UTC)
+  workflow_dispatch: {}        # run manually from the Actions tab
+permissions:
+  contents: write              # needed to push updated state.json
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+            persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run watcher
+        env:
+          DJANGO_USER: ${{ secrets.DJANGO_USER }}
+          DJANGO_PASS: ${{ secrets.DJANGO_PASS }}
+          SMTP_USER:  ${{ secrets.SMTP_USER }}
+          SMTP_PASS:  ${{ secrets.SMTP_PASS }}
+          TO_EMAIL:   ${{ secrets.TO_EMAIL }}
+          HUBSPOT_TOKEN:      ${{ secrets.HUBSPOT_TOKEN }}
+          HUBSPOT_COMPANY_ID: ${{ secrets.HUBSPOT_COMPANY_ID }}
+          HUBSPOT_OWNER_ID:   ${{ secrets.HUBSPOT_OWNER_ID }}
+        run: python watcher.py
+      - name: Commit updated state (if changed)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f state.json ] && [ -n "$(git status --porcelain state.json)" ]; then
+            git add state.json
+            git commit -m "Update state"
+            git push
+          else
+            echo "No state changes."
+          fi
