@@ -8,13 +8,13 @@ except Exception:
     BeautifulSoup = None
 
 # =========================
-# CONFIG
+# CONFIG (via env/secrets)
 # =========================
 LIST_URL  = os.environ.get(
     "LIST_URL",
     "https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/",
 )
-LOGIN_URL = os.environ.get("LOGIN_URL")  # optional admin login page
+LOGIN_URL = os.environ.get("LOGIN_URL")  # optional dedicated login page
 MODEL_PATH_SNIPPET = "/urgentcustomeruploadedpatent/"
 
 # Gmail (use an App Password)
@@ -24,15 +24,18 @@ SMTP_USER = os.environ["SMTP_USER"]
 SMTP_PASS = os.environ["SMTP_PASS"]
 TO_EMAIL  = os.environ["TO_EMAIL"]
 
-# Django
+# Django auth to view the page
 DJANGO_USERNAME = os.environ["DJANGO_USER"]
 DJANGO_PASSWORD = os.environ["DJANGO_PASS"]
 
 # HubSpot (Private App token)
-# Your private app should allow at least: Tasks (write) and Companies (write)
 HUBSPOT_TOKEN      = os.environ["HUBSPOT_TOKEN"]
-HUBSPOT_OWNER_ID   = os.environ.get("HUBSPOT_OWNER_ID", "154662807")    # assigned owner
-HUBSPOT_COMPANY_ID = os.environ.get("HUBSPOT_COMPANY_ID", "5590029115") # associate to this company
+HUBSPOT_OWNER_ID   = os.environ.get("HUBSPOT_OWNER_ID", "154662807")    # task owner
+HUBSPOT_COMPANY_ID = os.environ.get("HUBSPOT_COMPANY_ID", "5590029115") # company to associate
+HUBSPOT_PORTAL_ID  = os.environ.get("HUBSPOT_PORTAL_ID", "")            # for Slack link
+
+# Slack Workflow Webhook (your new workflow URL)
+SLACK_WORKFLOW_URL = os.environ.get("SLACK_WORKFLOW_URL")
 
 STATE_FILE = "state.json"
 MODE = os.environ.get("MODE", "normal").lower().strip()  # "normal" or "test"
@@ -132,7 +135,7 @@ def login_and_fetch(session: requests.Session):
     return r
 
 # =========================
-# Parsers
+# Parse page
 # =========================
 def parse_json_for_rows(text: str):
     try:
@@ -199,7 +202,7 @@ def parse_html_for_rows(html: str):
     return [{"id": i, "ft_ref": None} for i in ids]
 
 # =========================
-# HubSpot (Private App token)
+# HubSpot (task + associate)
 # =========================
 HS_BASE = "https://api.hubapi.com"
 
@@ -231,28 +234,50 @@ def hs_create_task(ft_ref: str, row_id: int) -> str:
     return task_id
 
 def hs_associate_task_to_company(task_id: str, company_id: str):
-    # v3 label-based association (no numeric type IDs needed)
     url = f"{HS_BASE}/crm/v3/associations/tasks/companies/batch/create"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
-    payload = {
-        "inputs": [{
-            "from": {"id": str(task_id)},
-            "to":   {"id": str(company_id)},
-            "type": "task_to_company"
-        }]
-    }
+    payload = {"inputs": [{
+        "from": {"id": str(task_id)},
+        "to":   {"id": str(company_id)},
+        "type": "task_to_company"
+    }]}
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.status_code >= 400:
         print("Associate task→company error:", r.status_code, r.text)
         r.raise_for_status()
     print(f"Task {task_id} associated to Company {company_id}.")
 
-def create_hubspot_task_and_link(ft_ref: str, row_id: int):
+# =========================
+# Slack Workflow webhook
+# =========================
+def send_slack_workflow(task_id: str):
+    if not SLACK_WORKFLOW_URL:
+        print("No SLACK_WORKFLOW_URL set; skipping Slack.")
+        return
+    payload = {
+        "portal_id": str(HUBSPOT_PORTAL_ID or ""),
+        "task_id": str(task_id),
+        # extra keys are fine; your message only uses portal_id + task_id
+    }
+    try:
+        r = requests.post(SLACK_WORKFLOW_URL, json=payload, timeout=15)
+        if r.status_code >= 400:
+            print("Slack workflow error:", r.status_code, r.text)
+        else:
+            print("Slack workflow triggered.")
+    except Exception as e:
+        print(f"Slack workflow exception: {e}")
+
+# =========================
+# Orchestration
+# =========================
+def create_hubspot_and_notify(ft_ref: str, row_id: int):
     tid = hs_create_task(ft_ref, row_id)
     try:
         hs_associate_task_to_company(tid, HUBSPOT_COMPANY_ID)
     except Exception as e:
         print(f"Association failed: {e}")
+    send_slack_workflow(tid)
 
 # =========================
 # Modes
@@ -292,7 +317,7 @@ def normal_mode():
             f"First non-empty detection.\nLatest ID: {latest['id']}\nFT PATENT REF: {ft or 'N/A'}\n\nOpen: {LIST_URL}"
         )
         try:
-            create_hubspot_task_and_link(ft, latest["id"])
+            create_hubspot_and_notify(ft, latest["id"])
         except Exception as e:
             print(f"HubSpot first-run error: {e}")
         state["last_seen_id"] = mx
@@ -315,7 +340,7 @@ def normal_mode():
         send_email("New entries detected", body)
         for r in new_rows:
             try:
-                create_hubspot_task_and_link(r.get("ft_ref"), r["id"])
+                create_hubspot_and_notify(r.get("ft_ref"), r["id"])
             except Exception as e:
                 print(f"HubSpot error for row {r['id']}: {e}")
         state["last_seen_id"] = mx
@@ -331,10 +356,10 @@ def test_mode():
         f"(Test run) Simulated new entry.\nID {fake_id} — FT PATENT REF: {fake_ft}\n\nOpen: {LIST_URL}"
     )
     try:
-        create_hubspot_task_and_link(fake_ft, fake_id)
+        create_hubspot_and_notify(fake_ft, fake_id)
     except Exception as e:
         print(f"HubSpot TEST error: {e}")
-    print("Test email + HubSpot task sent.")
+    print("Test email + HubSpot + Slack workflow sent.")
 
 # =========================
 # Entry
