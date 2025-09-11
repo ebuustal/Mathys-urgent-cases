@@ -1,5 +1,5 @@
 import os, re, json, smtplib, ssl, requests, time
-from email.mime_text import MIMEText
+from email.mime.text import MIMEText
 from email.utils import formatdate
 
 try:
