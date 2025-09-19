@@ -38,7 +38,7 @@ HUBSPOT_PORTAL_ID  = os.environ.get("HUBSPOT_PORTAL_ID", "")            # for Sl
 # Slack Workflow webhook (Slack → Automations → Workflow → From a webhook)
 SLACK_WORKFLOW_URL = os.environ.get("SLACK_WORKFLOW_URL")
 
-STATE_FILE = "state.json"
+STATE_FILE = {"last_seen_id": 0}
 MODE = os.environ.get("MODE", "normal").lower().strip()  # "normal" or "test"
 
 # =========================
