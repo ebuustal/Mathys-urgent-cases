@@ -1,54 +1,59 @@
-import os, re, json, smtplib, ssl, time, requests
+import os, re, json, time, smtplib, ssl, requests
 from email.mime.text import MIMEText
 from email.utils import formatdate
 
 try:
     from bs4 import BeautifulSoup
-except Exception:
+except Exception:  # GitHub Actions will pip install bs4
     BeautifulSoup = None
 
 # =========================
-# CONFIG
+# CONFIG (from env, sensible defaults)
 # =========================
+# Point straight at the Django ADMIN changelist + login:
 LIST_URL  = os.environ.get(
     "LIST_URL",
-    "https://team42api.herokuapp.com/passwordreset/database_models/urgentcustomeruploadedpatent/",
+    "https://team42api.herokuapp.com/admin/passwordreset/urgentcustomeruploadedpatent/",
 )
-LOGIN_URL = os.environ.get("LOGIN_URL")  # optional admin login page
-MODEL_PATH_SNIPPET = "/urgentcustomeruploadedpatent/"
+LOGIN_URL = os.environ.get(
+    "LOGIN_URL",
+    "https://team42api.herokuapp.com/admin/login/",
+)
+MODEL_PATH_SNIPPET = "/admin/passwordreset/urgentcustomeruploadedpatent/"
 
-# Gmail (use an App Password)
+# Django admin creds
+DJANGO_USERNAME = os.environ["DJANGO_USER"]
+DJANGO_PASSWORD = os.environ["DJANGO_PASS"]
+
+# Gmail (App Password)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ["SMTP_USER"]
 SMTP_PASS = os.environ["SMTP_PASS"]
 TO_EMAIL  = os.environ["TO_EMAIL"]
 
-# Django
-DJANGO_USERNAME = os.environ["DJANGO_USER"]
-DJANGO_PASSWORD = os.environ["DJANGO_PASS"]
+# HubSpot (Private App)
+HS_BASE             = "https://api.hubapi.com"
+HUBSPOT_TOKEN       = os.environ["HUBSPOT_TOKEN"]
+HUBSPOT_OWNER_ID    = os.environ.get("HUBSPOT_OWNER_ID", "154662807")    # who it’s assigned to
+HUBSPOT_COMPANY_ID  = os.environ.get("HUBSPOT_COMPANY_ID", "5590029115") # associate here
+HUBSPOT_CONTACT_ID  = os.environ.get("HUBSPOT_CONTACT_ID", "")           # optional fallback
 
-# HubSpot (Private App token)
-# Your private app should allow at least: Tasks (write) and Companies (write)
-HUBSPOT_TOKEN      = os.environ["HUBSPOT_TOKEN"]
-HUBSPOT_OWNER_ID   = os.environ.get("HUBSPOT_OWNER_ID", "154662807")    # assigned owner
-HUBSPOT_COMPANY_ID = os.environ.get("HUBSPOT_COMPANY_ID", "5590029115") # associate to this company
-HUBSPOT_PORTAL_ID  = os.environ.get("HUBSPOT_PORTAL_ID", "")            # for Slack link
+# Slack Workflow Webhook (created in Slack “Starts with a webhook”)
+SLACK_WORKFLOW_URL  = os.environ.get("SLACK_WORKFLOW_URL", "")
+HUBSPOT_PORTAL_ID   = os.environ.get("HUBSPOT_PORTAL_ID", "")            # not required for current Slack flow
 
-# Slack Workflow webhook (Slack → Automations → Workflow → From a webhook)
-SLACK_WORKFLOW_URL = os.environ.get("SLACK_WORKFLOW_URL")
-
-STATE_FILE = {"last_seen_id": 0}
-MODE = os.environ.get("MODE", "normal").lower().strip()  # "normal" or "test"
+STATE_FILE = "state.json"
+MODE = os.environ.get("MODE", "normal").strip().lower()  # "normal" or "test"
 
 # =========================
-# Email
+# Email helper
 # =========================
-def send_email(subject, body):
+def send_email(subject: str, body: str):
     msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = SMTP_USER
-    msg["To"] = TO_EMAIL
+    msg["To"]   = TO_EMAIL
     msg["Date"] = formatdate(localtime=True)
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
         s.starttls(context=ssl.create_default_context())
@@ -56,7 +61,7 @@ def send_email(subject, body):
         s.sendmail(SMTP_USER, [TO_EMAIL], msg.as_string())
 
 # =========================
-# State
+# State helpers
 # =========================
 def load_state():
     try:
@@ -70,7 +75,7 @@ def save_state(state):
         json.dump(state, f)
 
 # =========================
-# Fetch page (with login if needed)
+# Fetch with login
 # =========================
 def looks_like_login_html(html: str) -> bool:
     h = html.lower()
@@ -79,142 +84,127 @@ def looks_like_login_html(html: str) -> bool:
     ) and (("name=\"password\"" in h) or ("id=\"id_password\"" in h))
 
 def login_and_fetch(session: requests.Session):
-    if LOGIN_URL:
-        r0 = session.get(LOGIN_URL, timeout=30, allow_redirects=True)
-        r0.raise_for_status()
-        if looks_like_login_html(r0.text):
-            from bs4 import BeautifulSoup as BS
-            soup = BS(r0.text, "html.parser")
-            form = soup.find("form")
-            if not form:
-                raise RuntimeError("Login form not found at LOGIN_URL.")
-            post_url = requests.compat.urljoin(r0.url, form.get("action") or r0.url)
-            payload = {}
-            for inp in form.find_all("input"):
-                name = inp.get("name")
-                if not name:
-                    continue
-                payload[name] = inp.get("value", "")
-            for k in list(payload.keys()):
-                lk = k.lower()
-                if ("user" in lk and "name" in lk) or lk in ("email", "username"):
-                    payload[k] = DJANGO_USERNAME
-                if "pass" in lk:
-                    payload[k] = DJANGO_PASSWORD
-            r1 = session.post(post_url, data=payload, headers={"Referer": r0.url}, timeout=30, allow_redirects=True)
-            r1.raise_for_status()
-        r = session.get(LIST_URL, timeout=30, allow_redirects=True)
-        r.raise_for_status()
-        return r
+    # 1) Hit login page
+    r0 = session.get(LOGIN_URL, timeout=30, allow_redirects=True)
+    r0.raise_for_status()
 
-    r = session.get(LIST_URL, timeout=30, allow_redirects=True)
-    r.raise_for_status()
-    if "html" in (r.headers.get("content-type", "").lower()) and looks_like_login_html(r.text):
+    if looks_like_login_html(r0.text):
+        # Parse login form
         from bs4 import BeautifulSoup as BS
-        soup = BS(r.text, "html.parser")
+        soup = BS(r0.text, "html.parser")
         form = soup.find("form")
         if not form:
-            raise RuntimeError("Login form not found (auto).")
-        post_url = requests.compat.urljoin(r.url, form.get("action") or r.url)
+            raise RuntimeError("Login form not found at LOGIN_URL.")
+        post_url = requests.compat.urljoin(r0.url, form.get("action") or r0.url)
+
         payload = {}
         for inp in form.find_all("input"):
             name = inp.get("name")
             if not name:
                 continue
             payload[name] = inp.get("value", "")
+
+        # fill creds
         for k in list(payload.keys()):
             lk = k.lower()
             if ("user" in lk and "name" in lk) or lk in ("email", "username"):
                 payload[k] = DJANGO_USERNAME
             if "pass" in lk:
                 payload[k] = DJANGO_PASSWORD
-        r2 = session.post(post_url, data=payload, headers={"Referer": r.url}, timeout=30, allow_redirects=True)
-        r2.raise_for_status()
-        r3 = session.get(LIST_URL, timeout=30, allow_redirects=True)
-        r3.raise_for_status()
-        return r3
-    return r
+
+        r1 = session.post(
+            post_url,
+            data=payload,
+            headers={"Referer": r0.url},
+            timeout=30,
+            allow_redirects=True,
+        )
+        r1.raise_for_status()
+
+    # 2) Fetch the admin changelist
+    r2 = session.get(LIST_URL, timeout=30, allow_redirects=True)
+    r2.raise_for_status()
+    return r2
 
 # =========================
 # Parsers
 # =========================
-def parse_json_for_rows(text: str):
-    try:
-        data = json.loads(text)
-    except Exception:
-        return None
-    items = data if isinstance(data, list) else data.get("results") or data.get("data")
-    if not isinstance(items, list):
-        return None
-    rows = []
-    for obj in items:
-        if not isinstance(obj, dict):
-            continue
-        rid = None
-        if "id" in obj and str(obj["id"]).isdigit():
-            rid = int(obj["id"])
-        else:
-            for k, v in obj.items():
-                if k.endswith("_id") and str(v).isdigit():
-                    rid = int(v); break
-        if rid is None:
-            continue
-        ft = None
-        for k, v in obj.items():
-            lk = k.lower()
-            if "ft" in lk and "ref" in lk:
-                ft = str(v); break
-        rows.append({"id": rid, "ft_ref": ft})
-    return rows or None
-
 def parse_html_for_rows(html: str):
+    """
+    Extract rows from Django admin changelist.
+    We try to capture the numeric ID from the row link and the FT PATENT REF column value.
+    """
     if not BeautifulSoup:
         return []
+
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table")
+
+    # Prefer Django’s result_list table
+    table = soup.find("table", id="result_list") or soup.find("table")
+    rows = []
+    ft_idx = None
+
     if table:
-        header_cells = table.select("thead th")
-        if not header_cells:
+        # find header cells
+        head_tr = table.find("thead")
+        headers = []
+        if head_tr:
+            headers = [th.get_text(strip=True).upper() for th in head_tr.find_all("th")]
+        else:
             first_tr = table.find("tr")
             if first_tr:
-                header_cells = first_tr.find_all(["th", "td"])
-        headers = [th.get_text(strip=True).upper() for th in (header_cells or [])]
-        ft_idx = None
+                headers = [th.get_text(strip=True).upper() for th in first_tr.find_all(["th", "td"])]
+
+        # locate FT PATENT REF column if present
         for i, h in enumerate(headers):
             if "FT" in h and "PATENT" in h and "REF" in h:
-                ft_idx = i; break
+                ft_idx = i
+                break
+
+        # body rows
         body_rows = table.select("tbody tr") or table.find_all("tr")[1:]
-        rows = []
         for tr in body_rows:
+            # find the <a href=".../<id>/change/">
+            a = tr.find("a", href=True)
+            rid = None
+            if a:
+                m = re.search(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)/", a["href"])
+                if m:
+                    rid = int(m.group(1))
+            if rid is None:
+                # fallback: scan the row HTML
+                m = re.search(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)/", str(tr))
+                if m:
+                    rid = int(m.group(1))
+            if rid is None:
+                continue
+
+            # extract FT PATENT REF text if we found the column index
             cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
-            row_html = str(tr)
-            m = re.search(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)(?:/|\"|')", row_html)
-            if not m:
-                a = tr.find("a", href=True)
-                if a:
-                    m = re.search(r"/(\d+)(?:/|$)", a["href"])
-            if not m: continue
-            rid = int(m.group(1))
             ft = cells[ft_idx] if ft_idx is not None and ft_idx < len(cells) else None
+
             rows.append({"id": rid, "ft_ref": ft or None})
-        if rows:
-            return rows
-    ids = [int(m.group(1)) for m in re.finditer(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)(?:/|\"|')", html)]
-    return [{"id": i, "ft_ref": None} for i in ids]
+
+    # Last fallback: find any /urgentcustomeruploadedpatent/<id>/ in the entire page
+    if not rows:
+        ids = [int(m.group(1)) for m in re.finditer(re.escape(MODEL_PATH_SNIPPET) + r"(\d+)/", html)]
+        rows = [{"id": i, "ft_ref": None} for i in ids]
+
+    return rows
 
 # =========================
-# HubSpot (Private App token)
+# HubSpot helpers
 # =========================
-HS_BASE = "https://api.hubapi.com"
-
 def hs_create_task(ft_ref: str, row_id: int) -> str:
     url = f"{HS_BASE}/crm/v3/objects/tasks"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
+
     subject = "Manual Upload Verification"
     body = (
-        f"{ft_ref or f'ID {row_id}'}, please verify, "
-        f"if case due in less than 7 days please pass task to OX to confirm we are able to renew"
+        f"{ft_ref or f'ID {row_id}'}, please review. "
+        f"If case due in < 7 days, pass to OX to confirm we can renew."
     )
+
     payload = {
         "properties": {
             "hs_task_subject": subject,
@@ -235,7 +225,6 @@ def hs_create_task(ft_ref: str, row_id: int) -> str:
     return task_id
 
 def hs_associate_task_to_company(task_id: str, company_id: str):
-    # v3 label-based association (no numeric type IDs needed)
     url = f"{HS_BASE}/crm/v3/associations/tasks/companies/batch/create"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
     payload = {
@@ -251,30 +240,58 @@ def hs_associate_task_to_company(task_id: str, company_id: str):
         r.raise_for_status()
     print(f"Task {task_id} associated to Company {company_id}.")
 
-# -------- Slack workflow ping (ONLY addition) --------
+def hs_associate_task_to_contact(task_id: str, contact_id: str):
+    url = f"{HS_BASE}/crm/v3/associations/tasks/contacts/batch/create"
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "inputs": [{
+            "from": {"id": str(task_id)},
+            "to":   {"id": str(contact_id)},
+            "type": "task_to_contact"
+        }]
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    if r.status_code >= 400:
+        print("Associate task→contact error:", r.status_code, r.text)
+        r.raise_for_status()
+    print(f"Task {task_id} associated to Contact {contact_id}.")
+
+def create_hubspot_task_and_link(ft_ref: str, row_id: int) -> str:
+    tid = hs_create_task(ft_ref, row_id)
+    # Try company association; fall back to contact if provided
+    try:
+        hs_associate_task_to_company(tid, HUBSPOT_COMPANY_ID)
+    except Exception as e:
+        print(f"Company association failed: {e}")
+        if HUBSPOT_CONTACT_ID:
+            try:
+                hs_associate_task_to_contact(tid, HUBSPOT_CONTACT_ID)
+            except Exception as e2:
+                print(f"Contact association also failed: {e2}")
+    return tid
+
+# =========================
+# Slack (Workflow Webhook)
+# =========================
 def send_slack_workflow(task_id: str):
     if not SLACK_WORKFLOW_URL:
         print("No SLACK_WORKFLOW_URL set; skipping Slack.")
         return
     payload = {
-        "portal_id": str(HUBSPOT_PORTAL_ID or ""),
+        # Your Slack workflow currently uses only task_id with the
+        # company/engagement URL pattern. We include extras just in case.
         "task_id": str(task_id),
+        "portal_id": str(HUBSPOT_PORTAL_ID or ""),
+        "company_id": str(HUBSPOT_COMPANY_ID or ""),
     }
-    r = requests.post(SLACK_WORKFLOW_URL, json=payload, timeout=15)
-    if r.status_code >= 400:
-        print("Slack workflow error:", r.status_code, r.text)
-    else:
-        print("Slack workflow triggered.")
-# -----------------------------------------------------
-
-def create_hubspot_task_and_link(ft_ref: str, row_id: int):
-    tid = hs_create_task(ft_ref, row_id)
     try:
-        hs_associate_task_to_company(tid, HUBSPOT_COMPANY_ID)
+        r = requests.post(SLACK_WORKFLOW_URL, json=payload, timeout=15)
+        if r.status_code >= 400:
+            print("Slack workflow error:", r.status_code, r.text)
+        else:
+            print("Slack workflow triggered.")
     except Exception as e:
-        print(f"Association failed: {e}")
-    # NEW: notify Slack workflow
-    send_slack_workflow(tid)
+        print(f"Slack workflow exception: {e}")
 
 # =========================
 # Modes
@@ -283,20 +300,15 @@ def normal_mode():
     with requests.Session() as sess:
         resp = login_and_fetch(sess)
 
-    ct = resp.headers.get("content-type", "").lower()
     content = resp.text
-
-    # Save fetched page for debugging
+    # Save raw page for debugging
     try:
         with open("last_page.html", "w", encoding="utf-8") as f:
             f.write(content)
     except Exception:
         pass
 
-    rows = parse_json_for_rows(content) if "application/json" in ct else None
-    if not rows:
-        rows = parse_html_for_rows(content)
-
+    rows = parse_html_for_rows(content)
     if not rows:
         print("No rows found.")
         return
@@ -305,7 +317,7 @@ def normal_mode():
     last = int(state.get("last_seen_id", 0))
     mx = max(r["id"] for r in rows)
 
-    # First non-empty run: alert & create single task (latest)
+    # First non-empty run: create ONE task for latest row and alert
     if last == 0:
         latest = max(rows, key=lambda r: r["id"])
         ft = latest.get("ft_ref")
@@ -314,9 +326,10 @@ def normal_mode():
             f"First non-empty detection.\nLatest ID: {latest['id']}\nFT PATENT REF: {ft or 'N/A'}\n\nOpen: {LIST_URL}"
         )
         try:
-            create_hubspot_task_and_link(ft, latest["id"])
+            tid = create_hubspot_task_and_link(ft, latest["id"])
+            send_slack_workflow(tid)
         except Exception as e:
-            print(f"HubSpot first-run error: {e}")
+            print(f"HubSpot/Slack first-run error: {e}")
         state["last_seen_id"] = mx
         save_state(state)
         print(f"First-run alert done. Baseline set to {mx}.")
@@ -335,11 +348,14 @@ def normal_mode():
             f"Previous highest ID: {last}\nLatest ID now: {mx}\n\n" + "\n".join(lines) + f"\n\nOpen: {LIST_URL}"
         )
         send_email("New entries detected", body)
+
         for r in new_rows:
             try:
-                create_hubspot_task_and_link(r.get("ft_ref"), r["id"])
+                tid = create_hubspot_task_and_link(r.get("ft_ref"), r["id"])
+                send_slack_workflow(tid)
             except Exception as e:
-                print(f"HubSpot error for row {r['id']}: {e}")
+                print(f"HubSpot/Slack error for row {r['id']}: {e}")
+
         state["last_seen_id"] = mx
         save_state(state)
     else:
@@ -347,16 +363,17 @@ def normal_mode():
 
 def test_mode():
     fake_id = int(time.time()) % 1000000
-    fake_ft = "TEST-FT-REF-" + str(fake_id)
+    fake_ft = f"TEST-FT-REF-{fake_id}"
     send_email(
         "TEST: New entries detected",
         f"(Test run) Simulated new entry.\nID {fake_id} — FT PATENT REF: {fake_ft}\n\nOpen: {LIST_URL}"
     )
     try:
-        create_hubspot_task_and_link(fake_ft, fake_id)
+        tid = create_hubspot_task_and_link(fake_ft, fake_id)
+        send_slack_workflow(tid)
     except Exception as e:
-        print(f"HubSpot TEST error: {e}")
-    print("Test email + HubSpot task sent.")
+        print(f"HubSpot/Slack TEST error: {e}")
+    print("Test email + HubSpot task + Slack sent.")
 
 # =========================
 # Entry
